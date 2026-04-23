@@ -543,6 +543,7 @@ impl AssetToken {
         total_amount: i128,
         payout_asset: Address,
         tax_withholding_rate: u32,
+        snapshot_id: Option<u64>,
     ) -> u64 {
         admin.require_auth();
         
@@ -556,9 +557,12 @@ impl AssetToken {
         assert!(total_amount > 0, "amount must be positive");
         assert!(tax_withholding_rate <= 10000, "tax rate too high");
 
-        // Create snapshot first
-        let snapshot_id = Self::create_snapshot(env.clone(), admin.clone());
-        let snapshot: TokenSnapshot = env.storage().instance().get(&DataKey::TokenSnapshot(snapshot_id))
+        // Use provided snapshot_id or create a new one
+        let actual_snapshot_id = snapshot_id.unwrap_or_else(|| {
+            Self::create_snapshot(env.clone(), admin.clone())
+        });
+        
+        let snapshot: TokenSnapshot = env.storage().instance().get(&DataKey::TokenSnapshot(actual_snapshot_id))
             .expect("snapshot not found");
 
         let distribution_id = env.storage().instance().get(&DataKey::LastDistributionIndex).unwrap_or(0u64) + 1;
@@ -1461,8 +1465,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _ec_id) = setup(&env);
         
+        let snapshot_id = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500); // 5% tax
+        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500, &Some(snapshot_id)); // 5% tax
         
         assert_eq!(distribution_id, 1);
         
@@ -1479,8 +1484,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _ec_id) = setup(&env);
         
+        let snapshot_id = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500);
+        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500, &Some(snapshot_id));
         
         let user = Address::generate(&env);
         client.transfer(&admin, &user, &10000, &1, &_ec_id);
@@ -1501,8 +1507,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _ec_id) = setup(&env);
         
+        let snapshot_id = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500);
+        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500, &Some(snapshot_id));
         
         let user = Address::generate(&env);
         client.transfer(&admin, &user, &10000, &1, &_ec_id);
@@ -1532,8 +1539,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _ec_id) = setup(&env);
         
+        let snapshot_id = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500);
+        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500, &Some(snapshot_id));
         
         let distribution = client.get_distribution(&distribution_id).unwrap();
         assert!(!distribution.is_paused);
@@ -1556,8 +1564,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _ec_id) = setup(&env);
         
+        let snapshot_id = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500);
+        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500, &Some(snapshot_id));
         
         client.pause_distribution(&admin, &distribution_id);
         
@@ -1573,9 +1582,11 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _ec_id) = setup(&env);
         
+        let snapshot_id1 = client.create_snapshot(&admin);
+        let snapshot_id2 = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500);
-        client.create_dividend_distribution(&admin, &1, &150000, &payout_asset, &750);
+        client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500, &Some(snapshot_id1));
+        client.create_dividend_distribution(&admin, &1, &150000, &payout_asset, &750, &Some(snapshot_id2));
         
         let history = client.get_distribution_history(&1);
         assert_eq!(history.len(), 2);
@@ -1589,8 +1600,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _ec_id) = setup(&env);
         
+        let snapshot_id = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &1000); // 10% tax
+        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &1000, &Some(snapshot_id)); // 10% tax
         
         let user = Address::generate(&env);
         client.transfer(&admin, &user, &50000, &1, &_ec_id); // 50% of supply
@@ -1615,8 +1627,9 @@ mod test {
         
         client.pause_dividends(&admin);
         
+        let snapshot_id = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500);
+        client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500, &Some(snapshot_id));
     }
 
     #[test]
@@ -1625,8 +1638,9 @@ mod test {
         env.mock_all_auths();
         let (client, admin, _ec_id) = setup(&env);
         
+        let snapshot_id = client.create_snapshot(&admin);
         let payout_asset = Address::generate(&env);
-        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500);
+        let distribution_id = client.create_dividend_distribution(&admin, &1, &100000, &payout_asset, &500, &Some(snapshot_id));
         
         let unclaimed = client.calculate_unclaimed_dividends(&distribution_id);
         assert_eq!(unclaimed, 100000);
