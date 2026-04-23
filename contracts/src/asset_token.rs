@@ -151,6 +151,61 @@ pub struct SnapshotEntry {
     pub balance: i128,
 }
 
+#[derive(Clone)]
+#[contracttype]
+pub struct TransactionRecord {
+    pub tx_id: u64,
+    pub transaction_type: TransactionType,
+    pub from: Address,
+    pub to: Option<Address>,
+    pub amount: i128,
+    pub asset_id: u64,
+    pub timestamp: u64,
+    pub block_number: u64,
+    pub fee: i128,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+#[contracttype]
+pub enum TransactionType {
+    Transfer = 1,
+    Mint = 2,
+    Burn = 3,
+    Stake = 4,
+    Unstake = 5,
+    BridgeOut = 6,
+    BridgeIn = 7,
+    DividendClaim = 8,
+    DividendDistribution = 9,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct TransactionAnalytics {
+    pub total_transactions: u64,
+    pub total_volume: i128,
+    pub unique_addresses: u32,
+    pub average_transaction_size: i128,
+    pub timestamp: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct VolumeData {
+    pub timestamp: u64,
+    pub volume: i128,
+    pub transaction_count: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PriceHistory {
+    pub timestamp: u64,
+    pub price: i128,
+    pub volume: i128,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 #[contracttype]
 pub enum TargetChain {
@@ -223,6 +278,15 @@ pub enum DataKey {
     LastDistributionIndex, // for auto-incrementing distribution IDs
     LastSnapshotIndex, // for auto-incrementing snapshot IDs
     DividendPaused, // emergency pause flag
+    // Transaction history and analytics keys
+    TransactionRecord(u64), // tx_id -> record
+    UserTransactions(Address), // user -> Vec<tx_id>
+    AssetTransactions(u64), // asset_id -> Vec<tx_id>
+    LastTransactionIndex, // for auto-incrementing tx IDs
+    TransactionAnalytics(u64), // timestamp -> analytics
+    VolumeHistory(u64), // timestamp -> volume data
+    PriceHistory(u64), // timestamp -> price history
+    AnalyticsCache(u64), // cache key -> cached data
     // Cross-chain bridging keys
     BridgeConfig,
     PendingBridge(BytesN<32>), // bridge_id -> PendingBridge
@@ -715,6 +779,279 @@ impl AssetToken {
         distribution.is_paused = false;
         env.storage().instance().set(&DataKey::DividendDistribution(distribution_id), &distribution);
         env.events().publish((Symbol::new(&env, "distribution_resumed"),), distribution_id);
+    }
+
+    // Transaction History and Analytics Functions
+    // -----------------------------------------------------------------------
+
+    /// Record a transaction in the history
+    fn record_transaction(env: &Env, tx_type: TransactionType, from: Address, to: Option<Address>, amount: i128, asset_id: u64, fee: i128) {
+        let tx_id = env.storage().instance().get(&DataKey::LastTransactionIndex).unwrap_or(0u64) + 1;
+        let timestamp = env.ledger().timestamp();
+        let block_number = env.ledger().sequence() as u64;
+
+        let record = TransactionRecord {
+            tx_id,
+            transaction_type: tx_type,
+            from,
+            to,
+            amount,
+            asset_id,
+            timestamp,
+            block_number,
+            fee,
+        };
+
+        env.storage().instance().set(&DataKey::TransactionRecord(tx_id), &record);
+        env.storage().instance().set(&DataKey::LastTransactionIndex, &tx_id);
+
+        // Add to user's transaction history
+        let mut user_txs: Vec<u64> = env.storage().instance().get(&DataKey::UserTransactions(record.from.clone()))
+            .unwrap_or(Vec::new(env));
+        user_txs.push_back(tx_id);
+        env.storage().instance().set(&DataKey::UserTransactions(record.from), &user_txs);
+
+        // Add to asset's transaction history
+        let mut asset_txs: Vec<u64> = env.storage().instance().get(&DataKey::AssetTransactions(asset_id))
+            .unwrap_or(Vec::new(env));
+        asset_txs.push_back(tx_id);
+        env.storage().instance().set(&DataKey::AssetTransactions(asset_id), &asset_txs);
+    }
+
+    /// Get transaction record by ID
+    pub fn get_transaction(env: Env, tx_id: u64) -> Option<TransactionRecord> {
+        env.storage().instance().get(&DataKey::TransactionRecord(tx_id))
+    }
+
+    /// Get user's transaction history
+    pub fn get_user_transactions(env: Env, user: Address) -> Vec<u64> {
+        env.storage().instance().get(&DataKey::UserTransactions(user))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get asset's transaction history
+    pub fn get_asset_transactions(env: Env, asset_id: u64) -> Vec<u64> {
+        env.storage().instance().get(&DataKey::AssetTransactions(asset_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get transaction analytics for a time period
+    pub fn get_transaction_analytics(env: Env, start_time: u64, end_time: u64) -> TransactionAnalytics {
+        let last_tx_id = env.storage().instance().get(&DataKey::LastTransactionIndex).unwrap_or(0u64);
+        let mut total_transactions = 0u64;
+        let mut total_volume = 0i128;
+        let mut unique_addresses = Vec::<Address>::new(&env);
+        let mut total_amount = 0i128;
+
+        for tx_id in 1..=last_tx_id {
+            let record: Option<TransactionRecord> = env.storage().instance().get(&DataKey::TransactionRecord(tx_id));
+            if let Some(record) = record {
+                if record.timestamp >= start_time && record.timestamp <= end_time {
+                    total_transactions += 1;
+                    total_volume += record.amount;
+                    
+                    // Check if from address is already in unique list
+                    let mut from_found = false;
+                    for addr in unique_addresses.iter() {
+                        if addr == record.from {
+                            from_found = true;
+                            break;
+                        }
+                    }
+                    if !from_found {
+                        unique_addresses.push_back(record.from.clone());
+                    }
+                    
+                    if let Some(to) = &record.to {
+                        let mut to_found = false;
+                        for addr in unique_addresses.iter() {
+                            if addr == *to {
+                                to_found = true;
+                                break;
+                            }
+                        }
+                        if !to_found {
+                            unique_addresses.push_back(to.clone());
+                        }
+                    }
+                    
+                    total_amount += record.amount;
+                }
+            }
+        }
+
+        let avg_size = if total_transactions > 0 {
+            total_amount / total_transactions as i128
+        } else {
+            0
+        };
+
+        TransactionAnalytics {
+            total_transactions,
+            total_volume,
+            unique_addresses: unique_addresses.len() as u32,
+            average_transaction_size: avg_size,
+            timestamp: env.ledger().timestamp(),
+        }
+    }
+
+    /// Get volume data for time series visualization
+    pub fn get_volume_history(env: Env, start_time: u64, end_time: u64) -> Vec<VolumeData> {
+        let mut volume_data = Vec::new(&env);
+        let last_tx_id = env.storage().instance().get(&DataKey::LastTransactionIndex).unwrap_or(0u64);
+
+        // Group by hour for time series - use Vec for simplicity
+        let mut hourly_timestamps = Vec::<u64>::new(&env);
+        let mut hourly_volumes = Vec::<i128>::new(&env);
+        let mut hourly_counts = Vec::<u64>::new(&env);
+
+        for tx_id in 1..=last_tx_id {
+            let record: Option<TransactionRecord> = env.storage().instance().get(&DataKey::TransactionRecord(tx_id));
+            if let Some(record) = record {
+                if record.timestamp >= start_time && record.timestamp <= end_time {
+                    let hour = record.timestamp / 3600;
+                    
+                    // Find existing hour entry
+                    let mut found_idx: Option<u32> = None;
+                    for i in 0..hourly_timestamps.len() {
+                        let ts = hourly_timestamps.get(i).unwrap();
+                        if ts == hour {
+                            found_idx = Some(i);
+                            break;
+                        }
+                    }
+                    
+                    if let Some(idx) = found_idx {
+                        // Update existing entry
+                        let current_vol = hourly_volumes.get(idx).unwrap();
+                        hourly_volumes.set(idx, current_vol + record.amount);
+                        
+                        let current_count = hourly_counts.get(idx).unwrap();
+                        hourly_counts.set(idx, current_count + 1);
+                    } else {
+                        // Add new entry
+                        hourly_timestamps.push_back(hour);
+                        hourly_volumes.push_back(record.amount);
+                        hourly_counts.push_back(1);
+                    }
+                }
+            }
+        }
+
+        // Sort by timestamp
+        let mut sorted_data = Vec::<(u64, i128, u64)>::new(&env);
+        for i in 0..hourly_timestamps.len() {
+            sorted_data.push_back((
+                hourly_timestamps.get(i).unwrap(),
+                hourly_volumes.get(i).unwrap(),
+                hourly_counts.get(i).unwrap(),
+            ));
+        }
+
+        // Simple bubble sort for small datasets
+        for i in 0..sorted_data.len() {
+            for j in (i + 1)..sorted_data.len() {
+                if sorted_data.get(i).unwrap().0 > sorted_data.get(j).unwrap().0 {
+                    let temp = sorted_data.get(i).unwrap();
+                    sorted_data.set(i, sorted_data.get(j).unwrap());
+                    sorted_data.set(j, temp);
+                }
+            }
+        }
+
+        for data in sorted_data.iter() {
+            volume_data.push_back(VolumeData {
+                timestamp: data.0 * 3600,
+                volume: data.1,
+                transaction_count: data.2,
+            });
+        }
+
+        volume_data
+    }
+
+    /// Record price history entry
+    pub fn record_price(env: Env, price: i128, volume: i128) {
+        let timestamp = env.ledger().timestamp();
+        let price_entry = PriceHistory {
+            timestamp,
+            price,
+            volume,
+        };
+
+        env.storage().instance().set(&DataKey::PriceHistory(timestamp), &price_entry);
+    }
+
+    /// Get price history for a time range
+    pub fn get_price_history(env: Env, _start_time: u64, _end_time: u64) -> Vec<PriceHistory> {
+        let prices = Vec::new(&env);
+        // In a real implementation, you would iterate through stored price history
+        // For now, return empty vector as placeholder
+        prices
+    }
+
+    /// Get transaction statistics by type (simplified without HashMap)
+    pub fn get_transaction_stats_by_type(env: Env, start_time: u64, end_time: u64) -> Vec<(TransactionType, u64, i128)> {
+        let mut stats = Vec::<(TransactionType, u64, i128)>::new(&env);
+        let last_tx_id = env.storage().instance().get(&DataKey::LastTransactionIndex).unwrap_or(0u64);
+
+        // Initialize all transaction types with zeros
+        stats.push_back((TransactionType::Transfer, 0, 0));
+        stats.push_back((TransactionType::Mint, 0, 0));
+        stats.push_back((TransactionType::Burn, 0, 0));
+        stats.push_back((TransactionType::Stake, 0, 0));
+        stats.push_back((TransactionType::Unstake, 0, 0));
+        stats.push_back((TransactionType::BridgeOut, 0, 0));
+        stats.push_back((TransactionType::BridgeIn, 0, 0));
+        stats.push_back((TransactionType::DividendClaim, 0, 0));
+        stats.push_back((TransactionType::DividendDistribution, 0, 0));
+
+        for tx_id in 1..=last_tx_id {
+            let record: Option<TransactionRecord> = env.storage().instance().get(&DataKey::TransactionRecord(tx_id));
+            if let Some(record) = record {
+                if record.timestamp >= start_time && record.timestamp <= end_time {
+                    // Find and update the matching transaction type
+                    for i in 0..stats.len() {
+                        let (tx_type, count, amount) = stats.get(i).unwrap();
+                        if tx_type == record.transaction_type {
+                            stats.set(i, (tx_type, count + 1, amount + record.amount));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        stats
+    }
+
+    /// Export transaction history as records for CSV/PDF generation (done off-chain)
+    pub fn export_transactions(env: Env, user: Option<Address>, asset_id: Option<u64>, start_time: u64, end_time: u64) -> Vec<TransactionRecord> {
+        let mut records = Vec::new(&env);
+        
+        let tx_ids = if let Some(u) = user {
+            Self::get_user_transactions(env.clone(), u)
+        } else if let Some(aid) = asset_id {
+            Self::get_asset_transactions(env.clone(), aid)
+        } else {
+            let last_id = env.storage().instance().get(&DataKey::LastTransactionIndex).unwrap_or(0u64);
+            let mut all_ids = Vec::new(&env);
+            for id in 1..=last_id {
+                all_ids.push_back(id);
+            }
+            all_ids
+        };
+
+        for tx_id in tx_ids.iter() {
+            let record: Option<TransactionRecord> = env.storage().instance().get(&DataKey::TransactionRecord(tx_id));
+            if let Some(record) = record {
+                if record.timestamp >= start_time && record.timestamp <= end_time {
+                    records.push_back(record);
+                }
+            }
+        }
+
+        records
     }
 
     pub fn get_valuation_history(env: Env) -> Vec<ValuationRecord> {
