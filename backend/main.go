@@ -3,16 +3,36 @@ package main
 import (
 	"log"
 	"os"
-	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-	"github.com/yourusername/kor-assetforge/apperrors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
+	"github.com/ulule/limiter/v3"
+	_ "github.com/yourusername/kor-assetforge/docs"
 	"github.com/yourusername/kor-assetforge/config"
 	"github.com/yourusername/kor-assetforge/handlers"
+	"github.com/yourusername/kor-assetforge/middleware"
+	"github.com/yourusername/kor-assetforge/validator"
 	"github.com/yourusername/kor-assetforge/utils"
 )
 
+// @title kor-AssetForge API
+// @version 0.1.0
+// @description Decentralized marketplace for tokenizing and trading real-world assets on Stellar.
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name API Support
+// @contact.url http://www.swagger.io/support
+// @contact.email support@swagger.io
+
+// @license.name MIT
+// @license.url https://opensource.org/licenses/MIT
+
+// @host localhost:8080
+// @BasePath /api/v1
 func main() {
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
@@ -41,32 +61,58 @@ func main() {
 		defer redisClient.Close()
 	}
 
+	// Initialize Rate Limiter (e.g., 100 requests per minute)
+	var rateLimiterMiddleware gin.HandlerFunc
+	if redisClient != nil {
+		rl, err := handlers.NewRateLimiter(redisClient, limiter.Rate{
+			Period: time.Minute,
+			Limit:  100,
+		})
+		if err != nil {
+			log.Printf("Warning: Failed to initialize rate limiter: %v", err)
+		} else {
+			rateLimiterMiddleware = rl.Middleware()
+		}
+	}
+
 	// Setup router
 	router := gin.New() // Use gin.New() instead of gin.Default() to avoid default logger/recovery
-	
-	debugMode := strings.EqualFold(os.Getenv("DEBUG_MODE"), "true")
+
+	if err := validator.Init(); err != nil {
+		log.Fatalf("Failed to initialize validator: %v", err)
+	}
 
 	// Use custom enhanced middleware
 	router.Use(
 		handlers.RequestLogger(),
-		apperrors.ErrorHandler(debugMode),
+		handlers.GlobalErrorHandler(),
+		middleware.RequestSizeLimiter(2<<20),
+		middleware.RequireJSON(),
+		middleware.RateLimit(20, time.Minute),
+		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
 	)
 
-	router.GET("/metrics", apperrors.MetricsHandler)
+	// Health check handlers
+	healthHandler := handlers.NewHealthHandler(db, redisClient, stellarClient)
+	router.GET("/health", healthHandler.LivenessCheck)
+	router.GET("/health/ready", healthHandler.ReadinessCheck)
+	router.GET("/health/live", healthHandler.LivenessCheck)
 
-	// Health check endpoint
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"status":  "healthy",
-			"service": "kor-AssetForge API",
-			"version": "0.1.0",
-		})
-	})
+	// Metrics endpoint
+	// @Summary Prometheus metrics
+	// @Description Get service metrics in Prometheus format
+	// @Tags monitoring
+	// @Produce plain
+	// @Success 200 {string} string "Prometheus metrics"
+	// @Router /metrics [get]
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	// Swagger documentation
+	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
-		// Asset routes
 		// Asset routes
 		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient)
 		v1.POST("/assets/tokenize", assetHandler.TokenizeAsset)
