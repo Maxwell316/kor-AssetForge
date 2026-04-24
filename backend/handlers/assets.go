@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"github.com/yourusername/kor-assetforge/apperrors"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/utils"
 	"github.com/yourusername/kor-assetforge/validator"
@@ -46,7 +48,7 @@ func NewAssetHandler(db *gorm.DB, stellarClient *utils.StellarClient, redisClien
 func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 	var req validator.TokenizeAssetRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeBadRequest, "Invalid request payload", http.StatusBadRequest))
 		return
 	}
 
@@ -73,7 +75,7 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 	}
 
 	if err := h.db.Create(&asset).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create asset record"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to create asset record", http.StatusInternalServerError))
 		return
 	}
 
@@ -92,7 +94,6 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 		c.JSON(http.StatusAccepted, gin.H{
 			"message": "Asset created in database but contract invocation failed",
 			"asset":   asset,
-			"error":   err.Error(),
 		})
 		return
 	}
@@ -151,7 +152,7 @@ func (h *AssetHandler) ListAssets(c *gin.Context) {
 	var assets []models.Asset
 	var total int64
 	if err := utils.Paginate(h.db, page, limit, &total, &assets); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch assets"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to fetch assets", http.StatusInternalServerError))
 		return
 	}
 
@@ -305,7 +306,7 @@ func (h *AssetHandler) ListAssetForSale(c *gin.Context) {
 	}
 
 	if err := h.db.Create(&listing).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create listing"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to create listing", http.StatusInternalServerError))
 		return
 	}
 
@@ -362,7 +363,7 @@ func (h *AssetHandler) TransferAsset(c *gin.Context) {
 	}
 
 	if err := h.db.Create(&transaction).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record transaction"})
+		apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to record transaction", http.StatusInternalServerError))
 		return
 	}
 
