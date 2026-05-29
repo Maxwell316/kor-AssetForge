@@ -172,10 +172,20 @@ func main() {
 			protected.POST("/auth/2fa/disable", authHandler.Disable2FA)
 
 			// Admin-only routes
-			admin := protected.Group("")
-			admin.Use(authMiddleware.RequireRole(models.RoleAdmin))
+			adminGroup := protected.Group("")
+			adminGroup.Use(authMiddleware.RequireRole(models.RoleAdmin))
 			{
-				_ = admin // placeholder until admin routes are added
+				// Dispute admin endpoints — handlers declared below, referenced via closures
+				adminGroup.PUT("/disputes/:id/review", func(c *gin.Context) {
+					handlers.NewDisputeHandler(db).AdminReviewDispute(c)
+				})
+				adminGroup.PUT("/disputes/:id/resolve", func(c *gin.Context) {
+					handlers.NewDisputeHandler(db).AdminResolveDispute(c)
+				})
+				// Staking admin endpoint
+				adminGroup.POST("/staking/distribute", func(c *gin.Context) {
+					handlers.NewStakingHandler(db).DistributeRewards(c)
+				})
 			}
 		}
 
@@ -251,6 +261,40 @@ func main() {
 		v1.POST("/kyc/accredited", kycHandler.VerifyAccreditedInvestor)
 		v1.GET("/kyc/audit", kycHandler.GetAuditLog)
 		v1.GET("/compliance/report", kycHandler.ComplianceReport)
+
+		// Dispute resolution routes (#107)
+		disputeHandler := handlers.NewDisputeHandler(db)
+		v1.POST("/disputes", disputeHandler.FileDispute)
+		v1.GET("/disputes", disputeHandler.ListDisputes)
+		v1.GET("/disputes/history", disputeHandler.GetDisputeHistory)
+		v1.GET("/disputes/:id", disputeHandler.GetDispute)
+
+		// P2P secondary marketplace routes (#108)
+		p2pHandler := handlers.NewP2PHandler(db)
+		v1.POST("/p2p/orders", p2pHandler.CreateOrder)
+		v1.GET("/p2p/orders", p2pHandler.ListOrders)
+		v1.PUT("/p2p/orders/:id/cancel", p2pHandler.CancelOrder)
+		v1.GET("/p2p/trades", p2pHandler.GetTradeHistory)
+		v1.GET("/p2p/prices", p2pHandler.GetPriceChart)
+
+		// Staking rewards routes (#109)
+		stakingHandler := handlers.NewStakingHandler(db)
+		v1.POST("/staking/stake", stakingHandler.Stake)
+		v1.POST("/staking/unstake", stakingHandler.Unstake)
+		v1.POST("/staking/claim", stakingHandler.ClaimRewards)
+		v1.GET("/staking/dashboard", stakingHandler.GetStakingDashboard)
+		v1.GET("/staking/rewards/history", stakingHandler.GetRewardHistory)
+
+		// Liquidity pool routes (#110)
+		liquidityHandler := handlers.NewLiquidityHandler(db)
+		v1.POST("/liquidity/pools", liquidityHandler.CreatePool)
+		v1.GET("/liquidity/pools", liquidityHandler.ListPools)
+		v1.GET("/liquidity/pools/:id", liquidityHandler.GetPool)
+		v1.POST("/liquidity/add", liquidityHandler.AddLiquidity)
+		v1.POST("/liquidity/remove", liquidityHandler.RemoveLiquidity)
+		v1.POST("/liquidity/swap", liquidityHandler.Swap)
+		v1.GET("/liquidity/positions", liquidityHandler.GetLPPositions)
+		v1.GET("/liquidity/swaps", liquidityHandler.GetSwapHistory)
 
 		// Webhook routes
 		webhookHandler := handlers.NewWebhookHandler(db)
