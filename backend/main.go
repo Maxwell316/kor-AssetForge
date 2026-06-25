@@ -355,6 +355,16 @@ func main() {
 			webhookSubs.GET("/:id/logs", outgoingWebhookHandler.GetDeliveryLogs)
 		}
 
+		// Webhook retry and DLQ routes (#186)
+		webhookDeliveryGroup := protected.Group("/webhooks/delivery")
+		{
+			webhookDeliveryGroup.POST("/:id/retry", outgoingWebhookHandler.RetryDelivery)
+			webhookDeliveryGroup.POST("/retry-all", outgoingWebhookHandler.RetryAllFailedDeliveries)
+			webhookDeliveryGroup.POST("/replay-dlq", outgoingWebhookHandler.ReplayDLQ)
+			webhookDeliveryGroup.GET("/dashboard", outgoingWebhookHandler.GetDeliveryDashboard)
+			webhookDeliveryGroup.GET("/:id", outgoingWebhookHandler.GetDeliveryLog)
+		}
+
 		// Notification routes (#123)
 		notificationHandler := handlers.NewNotificationHandler(db)
 		notifGroup := protected.Group("/notifications")
@@ -423,6 +433,50 @@ func main() {
 			dashboardGroup.GET("/activity", dashboardHandler.GetActivityTimeline)
 			dashboardGroup.GET("/export", dashboardHandler.ExportReport)
 			dashboardGroup.POST("/activity", dashboardHandler.RecordActivity)
+		}
+
+		// ML-based asset recommendation routes (#184)
+		recommendationHandler := handlers.NewRecommendationHandler(db)
+		recGroup := protected.Group("/recommendations")
+		{
+			recGroup.GET("", recommendationHandler.GetRecommendations)
+			recGroup.GET("/content-based", recommendationHandler.GetContentBasedRecommendations)
+			recGroup.POST("/interactions", recommendationHandler.RecordInteraction)
+			recGroup.PUT("/:id/view", recommendationHandler.MarkRecommendationViewed)
+			recGroup.PUT("/preferences", recommendationHandler.UpdatePreferences)
+		}
+
+		// Asset rental and lease routes (#187)
+		rentalHandler := handlers.NewRentalHandler(db)
+		rentalGroup := protected.Group("/rentals")
+		{
+			rentalGroup.POST("", rentalHandler.CreateRental)
+			rentalGroup.GET("", rentalHandler.ListRentals)
+			rentalGroup.GET("/:id", rentalHandler.GetRental)
+			rentalGroup.POST("/:id/cancel", rentalHandler.CancelRental)
+			rentalGroup.POST("/:id/sign", rentalHandler.SignAgreement)
+			rentalGroup.POST("/:id/dispute", rentalHandler.DisputeRental)
+			rentalGroup.POST("/:id/payments", rentalHandler.ProcessPayment)
+			rentalGroup.GET("/:id/payments", rentalHandler.GetPaymentSchedule)
+			rentalGroup.GET("/:id/history", rentalHandler.GetRentalHistory)
+		}
+
+		// Configurable fractionalization limit routes (#188)
+		fractionHandler := handlers.NewFractionHandler(db)
+		fractionConfigGroup := adminGroup.Group("/fractionalization/configs")
+		{
+			fractionConfigGroup.POST("", fractionHandler.CreateConfig)
+			fractionConfigGroup.GET("", fractionHandler.ListConfigs)
+			fractionConfigGroup.GET("/:id", fractionHandler.GetConfig)
+			fractionConfigGroup.PUT("/:id", fractionHandler.UpdateConfig)
+			fractionConfigGroup.DELETE("/:id", fractionHandler.DeleteConfig)
+			fractionConfigGroup.GET("/by-type/:asset_type", fractionHandler.GetConfigByAssetType)
+		}
+		fractionAssetGroup := protected.Group("/fractionalization")
+		{
+			fractionAssetGroup.POST("/assets/:id/limits", fractionHandler.SetAssetFractionLimits)
+			fractionAssetGroup.GET("/assets/:id/limits", fractionHandler.GetAssetFractionLimits)
+			fractionAssetGroup.POST("/validate", fractionHandler.ValidateFractionalization)
 		}
 	}
 
