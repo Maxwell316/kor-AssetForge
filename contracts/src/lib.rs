@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod asset_token;
+pub mod asset_bundle;
 pub mod auction;
 pub mod bridge_security;
 pub mod dispute_resolution;
@@ -15,8 +16,10 @@ pub mod staking_rewards;
 pub mod upgradability;
 pub mod insurance;
 pub mod multisig;
+pub mod dividend_distributor;
 
 pub use asset_token::AssetToken;
+pub use dividend_distributor::DividendDistributor;
 pub use auction::AuctionHouse;
 pub use bridge_security::BridgeSecurity;
 pub use dispute_resolution::DisputeResolution;

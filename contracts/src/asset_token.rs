@@ -329,6 +329,8 @@ pub enum DataKey {
     // Concentration limits
     ConcentrationLimit,
     ExemptFromLimit(Address),
+    // Multi-signature integration
+    MultiSig,
 }
 
 #[derive(Clone)]
@@ -675,15 +677,15 @@ impl AssetToken {
         env.events().publish((Symbol::new(&env, "valuation_updated"),), new_value);
     }
 
-    pub fn set_oracle(env: Env, oracle: Address) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("admin not set");
-        admin.require_auth();
+    pub fn set_oracle(env: Env, caller: Address, oracle: Address) {
+        caller.require_auth();
+        Self::require_admin_or_multisig(&env, &caller);
         env.storage().instance().set(&DataKey::Oracle, &oracle);
     }
 
-    pub fn set_valuation_config(env: Env, min_interval: u64) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("admin not set");
-        admin.require_auth();
+    pub fn set_valuation_config(env: Env, caller: Address, min_interval: u64) {
+        caller.require_auth();
+        Self::require_admin_or_multisig(&env, &caller);
         env.storage().instance().set(&DataKey::ValuationConfig, &ValuationConfig { min_interval });
     }
 
@@ -1415,6 +1417,41 @@ impl AssetToken {
             .checked_div(SECONDS_IN_YEAR.checked_mul(BASIS_POINTS_DIVISOR).unwrap()).unwrap()
     }
 
+    // Multi-Signature Integration Functions
+    // -----------------------------------------------------------------------
+
+    /// Set the multi-sig contract address for high-value operations.
+    /// When set, sensitive admin operations must be routed through multi-sig.
+    pub fn set_multisig(env: Env, admin: Address, multisig: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("admin not set");
+        assert_eq!(admin, stored_admin, "not admin");
+        env.storage().instance().set(&DataKey::MultiSig, &multisig);
+        env.events().publish((Symbol::new(&env, "multisig_set"),), multisig);
+    }
+
+    /// Get the multi-sig contract address (if set).
+    pub fn get_multisig(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::MultiSig)
+    }
+
+    /// Require that the caller is either the direct admin or the multi-sig contract
+    /// when a multi-sig is configured. This allows the multi-sig to approve admin ops.
+    fn require_admin_or_multisig(env: &Env, caller: &Address) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("admin not set");
+        let ms: Option<Address> = env.storage().instance().get(&DataKey::MultiSig);
+        match ms {
+            Some(multisig) => {
+                // If multi-sig is configured, only the multi-sig contract can perform admin ops
+                assert_eq!(*caller, multisig, "multi-sig approval required");
+            }
+            None => {
+                // No multi-sig — direct admin auth
+                assert_eq!(*caller, stored_admin, "not admin");
+            }
+        }
+    }
+
     // Verification System Functions
     // -----------------------------------------------------------------------
 
@@ -1638,7 +1675,7 @@ mod test {
         assert_eq!(client.total_supply(), 100_000);
 
         // Valuation
-        client.set_oracle(&admin);
+        client.set_oracle(&admin, &admin);
         client.update_valuation(&admin, &110_000);
         let history = client.get_valuation_history();
         assert_eq!(history.len(), 1);
