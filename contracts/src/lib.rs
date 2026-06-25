@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod asset_token;
+pub mod asset_bundle;
 pub mod auction;
 pub mod bridge_security;
 pub mod dispute_resolution;

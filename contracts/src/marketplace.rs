@@ -148,6 +148,18 @@ pub struct Listing {
 
 #[derive(Clone)]
 #[contracttype]
+pub struct BundleListing {
+    pub listing_id: u64,
+    pub bundle_id: u64,
+    pub bundle_contract: Address,
+    pub seller: Address,
+    pub price: i128,
+    pub discount_bps: u32,
+    pub active: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
 pub enum MarketplaceDataKey {
     MarketplaceAdmin,
     AssetPrivate(u64),
@@ -179,6 +191,8 @@ pub enum MarketplaceDataKey {
     ReportNonce,
     GeneratedReport(u64),
     Oracle,
+    BundleListings,
+    BundleListing(u64),
 }
 
 /// Storage keys for buy-back and burn system.
@@ -774,6 +788,136 @@ impl Marketplace {
             ((oracle_price.price - price) * 10_000 / oracle_price.price) as u32
         };
         deviation_bps <= max_deviation_bps
+    }
+
+    // -----------------------------------------------------------------------
+    // Bundle Marketplace Integration
+    // -----------------------------------------------------------------------
+
+    /// List a bundle on the marketplace with an optional discount.
+    pub fn create_bundle_listing(
+        env: Env,
+        seller: Address,
+        bundle_id: u64,
+        bundle_contract: Address,
+        price: i128,
+        discount_bps: u32,
+        emergency_control_id: Address,
+    ) -> u64 {
+        seller.require_auth();
+        assert!(price > 0, "price must be positive");
+        assert!(discount_bps <= 10000, "discount must be <= 10000");
+
+        let ec_client = EmergencyControlClient::new(&env, &emergency_control_id);
+        ec_client.require_not_paused(&bundle_id, &PauseScope::Trading);
+
+        // Verify bundle exists via the bundle contract
+        let bundle_client = crate::asset_bundle::AssetBundleContractClient::new(&env, &bundle_contract);
+        let bundle = bundle_client.get_bundle(&bundle_id);
+        if bundle.is_none() {
+            panic!("bundle not found");
+        }
+        let bundle_data = bundle.unwrap();
+        if bundle_data.creator != seller {
+            panic!("only bundle creator can list");
+        }
+
+        let listing_id: u64 = env
+            .storage()
+            .instance()
+            .get(&MarketplaceDataKey::ListingNonce)
+            .unwrap_or(0) + 1;
+        env.storage().instance().set(&MarketplaceDataKey::ListingNonce, &listing_id);
+
+        let listing = BundleListing {
+            listing_id,
+            bundle_id,
+            bundle_contract,
+            seller: seller.clone(),
+            price,
+            discount_bps,
+            active: true,
+        };
+
+        env.storage().persistent().set(&MarketplaceDataKey::BundleListing(listing_id), &listing);
+
+        let mut list: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&MarketplaceDataKey::BundleListings)
+            .unwrap_or(Vec::new(&env));
+        list.push_back(listing_id);
+        env.storage().instance().set(&MarketplaceDataKey::BundleListings, &list);
+
+        Self::append_audit_entry(&env, seller, Symbol::new(&env, "bundle_listed"), bundle_id, price);
+        listing_id
+    }
+
+    /// Get a bundle listing by ID.
+    pub fn get_bundle_listing(env: Env, listing_id: u64) -> Option<BundleListing> {
+        env.storage().persistent().get(&MarketplaceDataKey::BundleListing(listing_id))
+    }
+
+    /// List all active bundle listing IDs.
+    pub fn get_bundle_listings(env: Env) -> Vec<u64> {
+        env.storage().instance().get(&MarketplaceDataKey::BundleListings)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Purchase a bundle listing through the marketplace.
+    /// The marketplace collects its fee, then completes the bundle purchase via the bundle contract.
+    pub fn buy_bundle_listing(
+        env: Env,
+        buyer: Address,
+        listing_id: u64,
+        emergency_control_id: Address,
+        token: Address,
+    ) -> bool {
+        buyer.require_auth();
+
+        let mut listing: BundleListing = env.storage().persistent()
+            .get(&MarketplaceDataKey::BundleListing(listing_id))
+            .expect("bundle listing not found");
+        assert!(listing.active, "listing not active");
+
+        let ec_client = EmergencyControlClient::new(&env, &emergency_control_id);
+        ec_client.require_not_paused(&listing.bundle_id, &PauseScope::Trading);
+
+        let fee = if env.storage().instance().has(&BuyBackDataKey::BuyBackConfigKey) {
+            Self::collect_fee(env.clone(), listing.price)
+        } else {
+            0
+        };
+
+        // Transfer tokens from buyer to seller (minus marketplace fee)
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        let net_price = listing.price - fee;
+        token_client.transfer(&buyer, &listing.seller, &net_price);
+
+        // Complete the bundle purchase through the bundle contract
+        let bundle_client = crate::asset_bundle::AssetBundleContractClient::new(&env, &listing.bundle_contract);
+        bundle_client.buy_bundle(&buyer, &listing.bundle_id, &token);
+
+        // Mark the bundle listing as sold
+        listing.active = false;
+        env.storage().persistent().set(&MarketplaceDataKey::BundleListing(listing_id), &listing);
+
+        Self::append_audit_entry(&env, buyer.clone(), Symbol::new(&env, "bundle_purchased"), listing.bundle_id, listing.price);
+        Self::credit_referral_reward(&env, &buyer, fee);
+
+        true
+    }
+
+    /// Cancel an active bundle listing.
+    pub fn cancel_bundle_listing(env: Env, seller: Address, listing_id: u64) {
+        seller.require_auth();
+        let mut listing: BundleListing = env.storage().persistent()
+            .get(&MarketplaceDataKey::BundleListing(listing_id))
+            .expect("bundle listing not found");
+        assert_eq!(listing.seller, seller, "only seller can cancel");
+        assert!(listing.active, "listing not active");
+        listing.active = false;
+        env.storage().persistent().set(&MarketplaceDataKey::BundleListing(listing_id), &listing);
     }
 
     // -----------------------------------------------------------------------
