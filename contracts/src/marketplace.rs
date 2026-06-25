@@ -2,6 +2,7 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 
 use crate::emergency_control::{EmergencyControlClient, PauseScope};
 use crate::governance::GovernanceClient;
+use crate::oracle::{OracleClient, AggregatedPrice};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -177,6 +178,7 @@ pub enum MarketplaceDataKey {
     ReportSchedule(u64),
     ReportNonce,
     GeneratedReport(u64),
+    Oracle,
 }
 
 /// Storage keys for buy-back and burn system.
@@ -331,6 +333,25 @@ impl Marketplace {
         listing_id
     }
 
+    /// Create a listing with oracle price validation.
+    /// The listing price must be within `max_deviation_bps` of the oracle price.
+    pub fn create_listing_with_oracle(
+        env: Env,
+        seller: Address,
+        asset_id: u64,
+        amount: i128,
+        price: i128,
+        emergency_control_id: Address,
+        governance_id: Option<Address>,
+        max_deviation_bps: u32,
+    ) -> u64 {
+        assert!(
+            Self::validate_listing_price(env.clone(), asset_id, price, max_deviation_bps),
+            "price deviates too much from oracle"
+        );
+        Self::create_listing(env, seller, asset_id, amount, price, emergency_control_id, governance_id)
+    }
+
     /// Purchase a listed asset.
     /// Blocked if the asset is paused for Trading scope.
     pub fn purchase(
@@ -358,6 +379,26 @@ impl Marketplace {
         }
 
         true
+    }
+
+    /// Purchase a listed asset with oracle price validation.
+    /// The purchase price must be within `max_deviation_bps` of the oracle price.
+    pub fn purchase_with_oracle_price(
+        env: Env,
+        buyer: Address,
+        listing_id: u64,
+        amount: i128,
+        asset_id: u64,
+        emergency_control_id: Address,
+        max_deviation_bps: u32,
+    ) -> bool {
+        let listing = Self::get_listing(env.clone(), listing_id)
+            .expect("listing not found");
+        assert!(
+            Self::validate_listing_price(env.clone(), asset_id, listing.price, max_deviation_bps),
+            "price deviates too much from oracle"
+        );
+        Self::purchase(env, buyer, listing_id, amount, asset_id, emergency_control_id)
     }
 
     pub fn cancel_listing(
@@ -699,6 +740,40 @@ impl Marketplace {
                 panic!("user not whitelisted for private asset");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Oracle Price Validation
+    // -----------------------------------------------------------------------
+
+    /// Set the oracle contract address for price validation.
+    pub fn set_marketplace_oracle(env: Env, admin: Address, oracle: Address) {
+        Self::require_admin(&env, &admin);
+        env.storage().instance().set(&MarketplaceDataKey::Oracle, &oracle);
+        env.events().publish((Symbol::new(&env, "oracle_set"),), oracle);
+    }
+
+    /// Get the oracle contract address.
+    pub fn get_marketplace_oracle(env: Env) -> Option<Address> {
+        env.storage().instance().get(&MarketplaceDataKey::Oracle)
+    }
+
+    /// Validate a price against the oracle.
+    /// Returns `true` if the price is within `max_deviation_bps` of the oracle price.
+    pub fn validate_listing_price(env: Env, asset_id: u64, price: i128, max_deviation_bps: u32) -> bool {
+        let oracle_addr: Address = env.storage().instance().get(&MarketplaceDataKey::Oracle)
+            .expect("oracle not configured");
+        let oracle = OracleClient::new(&env, &oracle_addr);
+        let oracle_price: AggregatedPrice = oracle.get_price(&asset_id);
+        if oracle_price.price == 0 {
+            return true;
+        }
+        let deviation_bps = if price >= oracle_price.price {
+            ((price - oracle_price.price) * 10_000 / oracle_price.price) as u32
+        } else {
+            ((oracle_price.price - price) * 10_000 / oracle_price.price) as u32
+        };
+        deviation_bps <= max_deviation_bps
     }
 
     // -----------------------------------------------------------------------
@@ -2981,6 +3056,56 @@ mod test {
 
         let generated = mp_client.run_due_reports(&admin);
         assert!(generated >= 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Oracle Integration Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_and_get_marketplace_oracle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mp_id = env.register_contract(None, Marketplace);
+        let mp_client = MarketplaceClient::new(&env, &mp_id);
+        let admin = Address::generate(&env);
+        mp_client.initialize(&admin);
+
+        let oracle_addr = Address::generate(&env);
+        mp_client.set_marketplace_oracle(&admin, &oracle_addr);
+        let stored = mp_client.get_marketplace_oracle().unwrap();
+        assert_eq!(stored, oracle_addr);
+    }
+
+    #[test]
+    fn test_oracle_set_and_get_on_marketplace() {
+        use crate::oracle::{Oracle, OracleClient};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Deploy oracle
+        let oracle_id = env.register_contract(None, Oracle);
+        let oracle_client = OracleClient::new(&env, &oracle_id);
+        let oracle_admin = Address::generate(&env);
+        oracle_client.initialize(&oracle_admin, &500);
+
+        // Deploy marketplace
+        let mp_id = env.register_contract(None, Marketplace);
+        let mp_client = MarketplaceClient::new(&env, &mp_id);
+        let mp_admin = Address::generate(&env);
+        mp_client.initialize(&mp_admin);
+
+        // Set marketplace on oracle
+        oracle_client.set_marketplace(&oracle_admin, &mp_id);
+        let stored_mp = oracle_client.get_marketplace().unwrap();
+        assert_eq!(stored_mp, mp_id);
+
+        // Set oracle on marketplace
+        mp_client.set_marketplace_oracle(&mp_admin, &oracle_id);
+        let stored_oracle = mp_client.get_marketplace_oracle().unwrap();
+        assert_eq!(stored_oracle, oracle_id);
     }
 
     #[test]
