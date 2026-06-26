@@ -244,6 +244,9 @@ func (h *AssetHandler) ListTransactions(c *gin.Context) {
 	if queryParams.AssetID != 0 {
 		query = query.Where("asset_id = ?", queryParams.AssetID)
 	}
+	if queryParams.Memo != "" {
+		query = query.Where("memo ILIKE ?", "%"+queryParams.Memo+"%")
+	}
 
 	paginationRes, err := utils.Paginate(query, c, page, limit, &total, &transactions)
 	if err != nil {
@@ -420,6 +423,7 @@ func (h *AssetHandler) TransferAsset(c *gin.Context) {
 		Amount:      req.Amount,
 		TxHash:      txHash,
 		Status:      "pending",
+		Memo:        req.Memo,
 	}
 
 	if err := h.db.Create(&transaction).Error; err != nil {
